@@ -1,6 +1,6 @@
 # Disaster Recovery — Warm Standby Stack
 
-Terraform module that provisions a **pilot-light / warm-standby** disaster-recovery environment for the FanSocial production application. On each apply it snapshots a live production EC2 instance into a dated AMI, then stands up a full replacement stack — Launch Template, Auto Scaling Group (scaled to zero), Application Load Balancer over HTTPS, Route 53 record — ready to be scaled up in seconds when the primary fails. The ASG stays at `desired_capacity = 0` in steady state to keep running cost minimal.
+Terraform module that provisions a **pilot-light / warm-standby** disaster-recovery environment for the etc production application. On each apply it snapshots a live production EC2 instance into a dated AMI, then stands up a full replacement stack — Launch Template, Auto Scaling Group (scaled to zero), Application Load Balancer over HTTPS, Route 53 record — ready to be scaled up in seconds when the primary fails. The ASG stays at `desired_capacity = 0` in steady state to keep running cost minimal.
 
 ## Highlights
 
@@ -65,36 +65,6 @@ DR-SETUP/
 - An ACM certificate in the same region as the ALB
 - An existing Route 53 hosted zone
 - An existing VPC + subnets + security group
-
-## Deployment
-
-Edit `terraform.tfvars`:
-
-```hcl
-source_instance_id = "i-0123456789abcdef0"
-vpc_id             = "vpc-0abc..."
-subnet_ids         = ["subnet-0...", "subnet-1..."]
-security_group_id  = "sg-0..."
-certificate_arn    = "arn:aws:acm:ap-northeast-1:<acct>:certificate/<cert-id>"
-hosted_zone_id     = "Z0..."
-domain_name        = "fansocial.app"
-```
-
-Then:
-
-```bash
-terraform init
-terraform plan
-terraform apply
-```
-
-## Failover
-
-```bash
-# Bring up one DR instance
-aws autoscaling set-desired-capacity \
-  --auto-scaling-group-name <dr_asg_name from output> \
-  --desired-capacity 1
 
 # Optional: flip your production Route 53 record to point at the DR ALB
 ```

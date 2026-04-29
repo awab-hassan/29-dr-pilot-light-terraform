@@ -1,72 +1,75 @@
-# Disaster Recovery — Warm Standby Stack
+# Project # 29 - dr-pilot-light-terraform
 
-Terraform module that provisions a **pilot-light / warm-standby** disaster-recovery environment for the etc production application. On each apply it snapshots a live production EC2 instance into a dated AMI, then stands up a full replacement stack — Launch Template, Auto Scaling Group (scaled to zero), Application Load Balancer over HTTPS, Route 53 record — ready to be scaled up in seconds when the primary fails. The ASG stays at `desired_capacity = 0` in steady state to keep running cost minimal.
-
-## Highlights
-
-- **Pilot-light topology** — ASG `desired = 0, min = 0, max = 1` means no instances run until you scale up, so monthly cost is dominated by the ALB only (no EC2 billing in steady state).
-- **AMI from live prod on every apply** — `aws_ami_from_instance` takes a fresh snapshot of `var.source_instance_id` each time Terraform runs, and the AMI name is datestamped (`${project}-${env}-YYYY-MM-DD`), giving a clean history of DR snapshots.
-- **HTTPS-first** — ALB listener is HTTPS-only on :443 with `ELBSecurityPolicy-2016-08` and a customer-supplied ACM certificate; health check on `/`.
-- **Route 53 integration** — creates a Route 53 alias `prod-dr.<domain>` pointing at the DR ALB so failover is a DNS flip — or you can point it at the live ALB today and flip at incident time.
-- **All wiring externalised** — VPC, subnets, SG, certificate, hosted zone, domain, and source instance ID are all variables (no hardcoded IDs). `terraform.tfvars` supplies the values.
+Terraform module that provisions a pilot-light disaster-recovery scaffold on AWS. On apply it snapshots a live production EC2 instance into a datestamped AMI, then stands up a complete replacement stack: Launch Template, Auto Scaling Group (scaled to zero), HTTPS Application Load Balancer with ACM, Target Group, and a Route 53 alias record. The ASG sits at `desired_capacity = 0` in steady state, keeping monthly cost dominated by the ALB rather than running EC2 hours.
 
 ## Architecture
 
 ```
- Prod instance (source_instance_id)
-          │
-          ▼  on `terraform apply`:
- aws_ami_from_instance (${project}-${env}-YYYY-MM-DD)
-          │
-          ▼
- Launch Template  ──► ASG (desired=0, max=1)  ──► Target Group :80
-                                                       │
-                                                       ▼
-                                            ALB (HTTPS :443, ACM cert)
-                                                       │
-                                                       ▼
-                                        Route 53  prod-dr.<domain>
+Production instance (var.source_instance_id)
+        |
+        | terraform apply -> aws_ami_from_instance
+        v
+AMI: <project>-<environment>-YYYY-MM-DD
+        |
+        v
+Launch Template -> ASG (desired=0, min=0, max=1) -> Target Group :80 (HTTP)
+                                                          |
+                                                          v
+                                              ALB (HTTPS :443, ACM cert)
+                                                          |
+                                                          v
+                                              Route 53: prod-dr.<domain>
 ```
 
-On a disaster event:
-1. Scale the ASG to `desired = 1`.
-2. The new instance boots from the last-captured AMI.
-3. Traffic follows the Route 53 record to the DR ALB.
+### Failover
 
-## Tech stack
+1. Scale the ASG to `desired = 1`. The new instance boots from the most recent AMI.
+2. Traffic flows via the Route 53 record to the DR ALB. Alternatively, flip the production Route 53 record to point at the DR ALB at incident time.
 
-- **Terraform** >= 1.x, AWS provider ~> 4.0
-- **AWS services:** EC2 AMI, Launch Template, Auto Scaling Group, Application Load Balancer, ACM, Route 53
+## What It Provisions
 
-## Repository layout
+- `aws_ami_from_instance` — fresh AMI of the source instance, datestamped per apply
+- Launch Template referencing the new AMI; `associate_public_ip_address = true`
+- Auto Scaling Group across the supplied subnets (`desired = 0, min = 0, max = 1`)
+- Application Load Balancer (internet-facing) with HTTPS listener on port 443 using the supplied ACM certificate
+- Target Group on port 80 / HTTP with health check on `/` (TLS terminates at the ALB)
+- Route 53 A-alias `prod-dr.<domain>` pointing at the DR ALB
+
+## Inputs
+
+| Variable | Purpose |
+|---|---|
+| `source_instance_id` | Production EC2 instance to snapshot |
+| `vpc_id` | Existing VPC for the DR stack |
+| `subnet_ids` | Subnets for the ASG and ALB |
+| `security_group_id` | Pre-existing security group |
+| `instance_type` | Launch Template instance type |
+| `certificate_arn` | ACM certificate for the HTTPS listener |
+| `hosted_zone_id` | Route 53 hosted zone for the DNS record |
+| `domain_name` | Domain for the `prod-dr.<domain>` alias |
+| `project_name`, `environment` | Used in resource and AMI naming |
+
+## Stack
+
+Terraform 1.x · AWS provider · EC2 AMI · Launch Template · Auto Scaling Group · Application Load Balancer · ACM · Route 53
+
+## Repository Layout
 
 ```
-DR-SETUP/
-├── README.md
+dr-pilot-light-terraform/
+├── main.tf
+├── variables.tf
+├── terraform.tfvars       # Values (gitignored)
 ├── .gitignore
-├── main.tf                # AMI, Launch Template, ASG, ALB, listener, Route 53
-├── variables.tf           # vpc_id, subnet_ids, instance_type, source_instance_id, hosted_zone_id, certificate_arn, ...
-└── terraform.tfvars       # values for the variables
+└── README.md
 ```
 
-## How it works
+## Deployment
 
-1. Terraform reads `var.source_instance_id` and snapshots it into a new AMI named `${project}-${environment}-YYYY-MM-DD`.
-2. A Launch Template references that AMI and associates a public IP + the supplied SG.
-3. The ASG uses that Launch Template across `var.subnet_ids`, with capacity pinned to 0 so nothing runs by default.
-4. An HTTPS-only ALB on :443 points at a new Target Group with a health check on `/`; the ALB listener uses `var.certificate_arn`.
-5. A Route 53 A-alias `prod-dr.${domain_name}` points at the ALB.
-
-## Prerequisites
-
-- Terraform >= 1.x
-- AWS CLI configured with permissions for `ec2:*`, `autoscaling:*`, `elasticloadbalancing:*`, `route53:ChangeResourceRecordSets`, `acm:DescribeCertificate`
-- An existing production EC2 instance (`source_instance_id`)
-- An ACM certificate in the same region as the ALB
-- An existing Route 53 hosted zone
-- An existing VPC + subnets + security group
-
-# Optional: flip your production Route 53 record to point at the DR ALB
+```bash
+terraform init
+terraform plan
+terraform apply
 ```
 
 ## Teardown
@@ -75,8 +78,26 @@ DR-SETUP/
 terraform destroy
 ```
 
-## Notes
+## Known Issues and Trade-offs
 
-- Captured AMIs are NOT garbage-collected automatically — add a lifecycle rule or periodic prune script if running this on a schedule.
-- The ALB is internet-facing — gate access with a Web ACL if exposing DR externally.
-- Demonstrates: pilot-light DR pattern, AMI-based snapshot strategy, HTTPS-only ALB with ACM, DNS-driven failover, ASG-as-warm-standby.
+This module is functional but has known design choices and bugs that should be addressed before production use.
+
+**AMI is recreated on every apply.** The AMI name uses `formatdate("YYYY-MM-DD", timestamp())`, and `timestamp()` is evaluated at every plan. This forces a new AMI (and a new Launch Template version) on every `terraform apply`, even when nothing else has changed. Mitigations:
+- Add `lifecycle { ignore_changes = [name] }` to `aws_ami_from_instance`, or
+- Move snapshot creation out of Terraform entirely and into a scheduled job (EventBridge + Lambda) that produces AMIs on a defined cadence rather than on every apply.
+
+**ALB and EC2 share one security group.** `var.security_group_id` is applied to both the ALB and the Launch Template. Production setups should separate these: an ALB security group accepting 443 from the internet, and an instance security group accepting traffic only from the ALB SG on the app port.
+
+**Instances get public IPs.** `associate_public_ip_address = true` on the Launch Template means DR instances are directly addressable from the internet. Best practice is private subnets for instances and public subnets only for the ALB.
+
+**TLS terminates at the ALB.** Target group is HTTP on port 80. Traffic between the ALB and the EC2 instances is plaintext. If end-to-end encryption is required, switch the target group to HTTPS and run TLS on the instance.
+
+**No HTTP-to-HTTPS redirect.** The ALB listens only on 443. Requests on port 80 fail rather than redirecting. Add a port 80 listener with a redirect action if browser clients are expected.
+
+**TLS policy is dated.** `ELBSecurityPolicy-2016-08` includes older protocols. Use a modern policy such as `ELBSecurityPolicy-TLS13-1-2-2021-06` unless older clients must be supported.
+
+**No AMI lifecycle policy.** Each apply creates a new AMI and underlying EBS snapshots. Without periodic cleanup, costs accumulate indefinitely. Add a lifecycle Lambda or use AWS Backup with a retention policy.
+
+**Source instance reboots during snapshot.** `aws_ami_from_instance` defaults to rebooting the source for filesystem consistency. If running this against live production, schedule applies during a maintenance window or set `snapshot_without_reboot = true` only if the workload tolerates a crash-consistent snapshot.
+
+**AMI is point-in-time.** Any data written to the source instance's local disk between snapshots is lost on failover. Persistent data should live in RDS, EFS, or S3, never on the EC2 root volume.

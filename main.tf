@@ -71,7 +71,7 @@ resource "aws_lb" "dr_alb" {
 # ALB Target Group
 resource "aws_lb_target_group" "dr_tg" {
   name     = "${var.project_name}-${var.environment}-tg"
-  port     = 80
+  port     = 8000
   protocol = "HTTP"
   vpc_id   = var.vpc_id
 

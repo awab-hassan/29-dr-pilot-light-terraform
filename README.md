@@ -1,103 +1,67 @@
-# Project # 29 - dr-pilot-light-terraform
+# Project 29: Pilot-Light Disaster Recovery (Terraform)
 
-Terraform module that provisions a pilot-light disaster-recovery scaffold on AWS. On apply it snapshots a live production EC2 instance into a datestamped AMI, then stands up a complete replacement stack: Launch Template, Auto Scaling Group (scaled to zero), HTTPS Application Load Balancer with ACM, Target Group, and a Route 53 alias record. The ASG sits at `desired_capacity = 0` in steady state, keeping monthly cost dominated by the ALB rather than running EC2 hours.
+I built this Terraform module to set up a classic "pilot-light" disaster recovery scaffold on AWS. When you run `terraform apply`, it takes a snapshot of a live production EC2 instance, makes a datestamped AMI, and then spins up a full replacement stack. 
+
+The real trick here is that the Auto Scaling Group (ASG) sits at `desired_capacity = 0` during steady state. That keeps your monthly AWS bill focused mostly on the static ALB costs, rather than burning money on idle EC2 compute hours.
 
 ## Architecture
 
-```
-Production instance (var.source_instance_id)
-        |
-        | terraform apply -> aws_ami_from_instance
-        v
-AMI: <project>-<environment>-YYYY-MM-DD
-        |
-        v
-Launch Template -> ASG (desired=0, min=0, max=1) -> Target Group :80 (HTTP)
-                                                          |
-                                                          v
-                                              ALB (HTTPS :443, ACM cert)
-                                                          |
-                                                          v
-                                              Route 53: prod-dr.<domain>
-```
+![Architecture Diagram](architecture.png)
 
-### Failover
+### How to Failover
 
-1. Scale the ASG to `desired = 1`. The new instance boots from the most recent AMI.
-2. Traffic flows via the Route 53 record to the DR ALB. Alternatively, flip the production Route 53 record to point at the DR ALB at incident time.
+When an incident hits, the recovery process is dead simple:
+1. Manually bump the ASG to `desired = 1`. The new instance boots up using the most recent point-in-time AMI.
+2. Traffic starts flowing through the DR ALB via the pre-configured Route 53 alias (`prod-dr.<domain>`). Alternatively, you can just flip your main production DNS record to point at this DR ALB.
 
 ## What It Provisions
 
-- `aws_ami_from_instance` — fresh AMI of the source instance, datestamped per apply
-- Launch Template referencing the new AMI; `associate_public_ip_address = true`
-- Auto Scaling Group across the supplied subnets (`desired = 0, min = 0, max = 1`)
-- Application Load Balancer (internet-facing) with HTTPS listener on port 443 using the supplied ACM certificate
-- Target Group on port 80 / HTTP with health check on `/` (TLS terminates at the ALB)
-- Route 53 A-alias `prod-dr.<domain>` pointing at the DR ALB
-
-## Inputs
-
-| Variable | Purpose |
-|---|---|
-| `source_instance_id` | Production EC2 instance to snapshot |
-| `vpc_id` | Existing VPC for the DR stack |
-| `subnet_ids` | Subnets for the ASG and ALB |
-| `security_group_id` | Pre-existing security group |
-| `instance_type` | Launch Template instance type |
-| `certificate_arn` | ACM certificate for the HTTPS listener |
-| `hosted_zone_id` | Route 53 hosted zone for the DNS record |
-| `domain_name` | Domain for the `prod-dr.<domain>` alias |
-| `project_name`, `environment` | Used in resource and AMI naming |
+- **`aws_ami_from_instance`** — Generates a fresh, datestamped AMI from the live source instance.
+- **Launch Template** — Points to the newly minted AMI. 
+- **Auto Scaling Group** — Spans the provided subnets. Hardcoded to `desired = 0, min = 0, max = 1`.
+- **Application Load Balancer** — Internet-facing, listening on port 443 using your provided ACM certificate.
+- **Target Group** — Routes traffic to port 80 / HTTP (TLS terminates at the ALB).
+- **Route 53 Alias** — Creates the `prod-dr.<domain>` record routing into the ALB.
 
 ## Stack
 
-Terraform 1.x · AWS provider · EC2 AMI · Launch Template · Auto Scaling Group · Application Load Balancer · ACM · Route 53
+Terraform 1.x · AWS Provider · EC2 AMIs · Launch Templates · Auto Scaling Groups · Application Load Balancer · ACM · Route 53
 
-## Repository Layout
+## Required Inputs
 
-```
-dr-pilot-light-terraform/
-├── main.tf
-├── variables.tf
-├── terraform.tfvars       # Values (gitignored)
-├── .gitignore
-└── README.md
-```
+| Variable | Purpose |
+|---|---|
+| `source_instance_id` | The live production EC2 instance you want to snapshot |
+| `vpc_id` | Existing VPC where the DR stack will live |
+| `subnet_ids` | Subnets for the ASG and ALB |
+| `security_group_id` | Pre-existing security group to apply |
+| `instance_type` | Compute size for the Launch Template |
+| `certificate_arn` | ACM certificate for the HTTPS listener |
+| `hosted_zone_id` | Route 53 hosted zone ID for the DNS record |
+| `domain_name` | Domain used to construct the `prod-dr.<domain>` alias |
+| `project_name`, `environment` | Naming convention variables for tagging and AMI naming |
 
-## Deployment
+## Deployment & Teardown
 
 ```bash
+# Standard deployment
 terraform init
 terraform plan
 terraform apply
-```
 
-## Teardown
-
-```bash
+# To destroy the stack
 terraform destroy
 ```
 
-## Known Issues and Trade-offs
+## The "Gotchas" (Technical Debt & Known Issues)
 
-This module is functional but has known design choices and bugs that should be addressed before production use.
+This module works great as a scaffold, but I left a few deliberate design trade-offs in here that you'd want to clean up before pointing it at a true enterprise production workload:
 
-**AMI is recreated on every apply.** The AMI name uses `formatdate("YYYY-MM-DD", timestamp())`, and `timestamp()` is evaluated at every plan. This forces a new AMI (and a new Launch Template version) on every `terraform apply`, even when nothing else has changed. Mitigations:
-- Add `lifecycle { ignore_changes = [name] }` to `aws_ami_from_instance`, or
-- Move snapshot creation out of Terraform entirely and into a scheduled job (EventBridge + Lambda) that produces AMIs on a defined cadence rather than on every apply.
-
-**ALB and EC2 share one security group.** `var.security_group_id` is applied to both the ALB and the Launch Template. Production setups should separate these: an ALB security group accepting 443 from the internet, and an instance security group accepting traffic only from the ALB SG on the app port.
-
-**Instances get public IPs.** `associate_public_ip_address = true` on the Launch Template means DR instances are directly addressable from the internet. Best practice is private subnets for instances and public subnets only for the ALB.
-
-**TLS terminates at the ALB.** Target group is HTTP on port 80. Traffic between the ALB and the EC2 instances is plaintext. If end-to-end encryption is required, switch the target group to HTTPS and run TLS on the instance.
-
-**No HTTP-to-HTTPS redirect.** The ALB listens only on 443. Requests on port 80 fail rather than redirecting. Add a port 80 listener with a redirect action if browser clients are expected.
-
-**TLS policy is dated.** `ELBSecurityPolicy-2016-08` includes older protocols. Use a modern policy such as `ELBSecurityPolicy-TLS13-1-2-2021-06` unless older clients must be supported.
-
-**No AMI lifecycle policy.** Each apply creates a new AMI and underlying EBS snapshots. Without periodic cleanup, costs accumulate indefinitely. Add a lifecycle Lambda or use AWS Backup with a retention policy.
-
-**Source instance reboots during snapshot.** `aws_ami_from_instance` defaults to rebooting the source for filesystem consistency. If running this against live production, schedule applies during a maintenance window or set `snapshot_without_reboot = true` only if the workload tolerates a crash-consistent snapshot.
-
-**AMI is point-in-time.** Any data written to the source instance's local disk between snapshots is lost on failover. Persistent data should live in RDS, EFS, or S3, never on the EC2 root volume.
+* **The AMI timestamp bug:** The AMI naming uses `formatdate("YYYY-MM-DD", timestamp())`. Because `timestamp()` is evaluated on every single plan, Terraform will force a brand new AMI and Launch Template version on *every* apply, even if you didn't change anything. **The fix:** Add a `lifecycle { ignore_changes = [name] }` block, or better yet, move the snapshot logic out of Terraform and into a scheduled EventBridge/Lambda cron job.
+* **Shared Security Groups:** Right now, the ALB and the EC2 instances share the exact same security group. A hardened production setup should split those—one SG letting HTTPS into the ALB, and an internal SG letting only ALB traffic hit the instance.
+* **Public IP addresses:** The Launch Template sets `associate_public_ip_address = true`, meaning your DR instances get public IPs. It's functional, but best practice dictates tossing them into private subnets and keeping only the ALB public.
+* **Plaintext internal traffic:** TLS terminates at the ALB, so traffic jumping from the load balancer to the EC2 instances is unencrypted. If your compliance team demands end-to-end encryption, you'll need to switch the target group to HTTPS and manage certificates on the instance itself.
+* **No HTTP-to-HTTPS redirect:** The ALB only listens on 443. Port 80 requests will just drop instead of gracefully redirecting, which can be annoying for browser clients.
+* **Dated TLS Policy:** It defaults to `ELBSecurityPolicy-2016-08`. Unless you absolutely have to support ancient browsers, bump that up to `ELBSecurityPolicy-TLS13-1-2-2021-06`.
+* **Reboot during snapshot:** By default, taking an AMI reboots the source instance to ensure filesystem consistency. If you point this at a live production box, it *will* cause a blip. Set `snapshot_without_reboot = true` if your application can tolerate a crash-consistent snapshot, or only run this during a maintenance window.
+* **Local state is gone forever:** AMIs are point-in-time. Any local disk writes that happen after the snapshot are lost if you fail over. Always keep your persistent state tucked away in RDS, EFS, or S3.

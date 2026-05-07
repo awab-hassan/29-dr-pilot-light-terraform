@@ -16,12 +16,12 @@ When an incident hits, the recovery process is dead simple:
 
 ## What It Provisions
 
-- **`aws_ami_from_instance`** — Generates a fresh, datestamped AMI from the live source instance.
-- **Launch Template** — Points to the newly minted AMI. 
-- **Auto Scaling Group** — Spans the provided subnets. Hardcoded to `desired = 0, min = 0, max = 1`.
-- **Application Load Balancer** — Internet-facing, listening on port 443 using your provided ACM certificate.
-- **Target Group** — Routes traffic to port 80 / HTTP (TLS terminates at the ALB).
-- **Route 53 Alias** — Creates the `prod-dr.<domain>` record routing into the ALB.
+- **`aws_ami_from_instance`**: Generates a fresh, datestamped AMI from the live source instance.
+- **Launch Template**: Points to the newly minted AMI. 
+- **Auto Scaling Group**: Spans the provided subnets. Hardcoded to `desired = 0, min = 0, max = 1`.
+- **Application Load Balancer**: Internet-facing, listening on port 443 using your provided ACM certificate.
+- **Target Group**: Routes traffic to port 80 / HTTP (TLS terminates at the ALB).
+- **Route 53 Alias**: Creates the `prod-dr.<domain>` record routing into the ALB.
 
 ## Stack
 
